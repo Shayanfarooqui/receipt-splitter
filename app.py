@@ -64,6 +64,13 @@ def split_page():
     return render_template('index.html', page='split', settings=settings)
 
 
+@app.route('/users')
+def users_page():
+    """User management page."""
+    users = db.get_all_users()
+    return render_template('index.html', page='users', users=users)
+
+
 # ─── API Endpoints ───────────────────────────────────────────────────
 
 @app.route('/api/scan', methods=['POST'])
@@ -106,7 +113,8 @@ def save_receipt():
         total_amount=float(data.get('total_amount', 0)),
         image_path=data.get('image_path', ''),
         discounts=data.get('discounts', []),
-        total_savings=float(data.get('total_savings', 0))
+        total_savings=float(data.get('total_savings', 0)),
+        user_id=data.get('user_id')
     )
     return jsonify({'success': True, 'id': receipt_id})
 
@@ -154,6 +162,88 @@ def calculate_split():
         'period_end': period_end,
         'receipts': receipts
     })
+
+
+# ─── User Management API ────────────────────────────────────────
+
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    """Get all users."""
+    users = db.get_all_users()
+    return jsonify({'success': True, 'users': users})
+
+
+@app.route('/api/users', methods=['POST'])
+def add_user():
+    """Add a new user."""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    name = data.get('name', '').strip()
+    pin = data.get('pin', '').strip()
+
+    if not name:
+        return jsonify({'error': 'Name is required'}), 400
+
+    if not pin or len(pin) != 6 or not pin.isdigit():
+        return jsonify({'error': 'PIN must be exactly 6 digits'}), 400
+
+    try:
+        user_id = db.add_user(name, pin)
+        return jsonify({'success': True, 'id': user_id})
+    except Exception as e:
+        return jsonify({'error': f'Failed to add user: {str(e)}'}), 500
+
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    """Delete a user."""
+    try:
+        db.delete_user(user_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': f'Failed to delete user: {str(e)}'}), 500
+
+
+@app.route('/api/users/<int:user_id>/pin', methods=['PUT'])
+def update_user_pin(user_id):
+    """Update a user's PIN."""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    new_pin = data.get('pin', '').strip()
+
+    if not new_pin or len(new_pin) != 6 or not new_pin.isdigit():
+        return jsonify({'error': 'PIN must be exactly 6 digits'}), 400
+
+    try:
+        db.update_user_pin(user_id, new_pin)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': f'Failed to update PIN: {str(e)}'}), 500
+
+
+@app.route('/api/users/verify', methods=['POST'])
+def verify_user_pin():
+    """Verify a user's PIN."""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    user_id = data.get('user_id')
+    pin = data.get('pin', '').strip()
+
+    if not user_id or not pin:
+        return jsonify({'error': 'User ID and PIN are required'}), 400
+
+    is_valid = db.verify_pin(user_id, pin)
+    if is_valid:
+        user = db.get_user_by_id(user_id)
+        return jsonify({'success': True, 'valid': True, 'user': user})
+    else:
+        return jsonify({'success': True, 'valid': False})
 
 
 if __name__ == '__main__':

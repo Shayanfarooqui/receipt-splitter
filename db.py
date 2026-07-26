@@ -24,6 +24,16 @@ class ReceiptDB:
         conn = self._get_conn()
         cursor = conn.cursor()
 
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                pin TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        ''')
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS receipts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,7 +44,9 @@ class ReceiptDB:
                 total_amount REAL NOT NULL DEFAULT 0,
                 total_savings REAL NOT NULL DEFAULT 0,
                 image_path TEXT,
-                created_at TEXT NOT NULL
+                user_id INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
             )
         ''')
 
@@ -44,6 +56,12 @@ class ReceiptDB:
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE receipts ADD COLUMN discounts TEXT NOT NULL DEFAULT '[]'")
             cursor.execute("ALTER TABLE receipts ADD COLUMN total_savings REAL NOT NULL DEFAULT 0")
+
+        # Migrate: add user_id column if missing
+        try:
+            cursor.execute('SELECT user_id FROM receipts LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE receipts ADD COLUMN user_id INTEGER")
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
@@ -63,13 +81,13 @@ class ReceiptDB:
     # ─── Receipts ────────────────────────────────────────────────────
 
     def add_receipt(self, store_name, date, items, total_amount, image_path='',
-                    discounts=None, total_savings=0):
+                    discounts=None, total_savings=0, user_id=None):
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO receipts (store_name, date, items, discounts, total_amount,
-                                  total_savings, image_path, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                  total_savings, image_path, user_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             store_name,
             date,
@@ -78,6 +96,7 @@ class ReceiptDB:
             total_amount,
             total_savings,
             image_path,
+            user_id,
             datetime.now().isoformat()
         ))
         receipt_id = cursor.lastrowid
@@ -158,5 +177,65 @@ class ReceiptDB:
             UPDATE settings SET residents = ?, period_start = ?, period_end = ?
             WHERE id = 1
         ''', (residents, period_start, period_end))
+        conn.commit()
+        conn.close()
+
+    # ─── Users ───────────────────────────────────────────────────
+
+    def add_user(self, name, pin):
+        """Add a new user with a 6-digit PIN."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO users (name, pin, created_at)
+            VALUES (?, ?, ?)
+        ''', (name, pin, datetime.now().isoformat()))
+        user_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return user_id
+
+    def get_all_users(self):
+        """Get all users (without PINs for security)."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name, created_at FROM users ORDER BY name')
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def verify_pin(self, user_id, pin):
+        """Verify a user's PIN."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT pin FROM users WHERE id = ?', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row['pin'] == pin:
+            return True
+        return False
+
+    def get_user_by_id(self, user_id):
+        """Get user details by ID."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name, created_at FROM users WHERE id = ?', (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def delete_user(self, user_id):
+        """Delete a user."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+    def update_user_pin(self, user_id, new_pin):
+        """Update a user's PIN."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET pin = ? WHERE id = ?', (new_pin, user_id))
         conn.commit()
         conn.close()

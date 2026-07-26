@@ -880,6 +880,9 @@
                 <li><a href="/split" class="nav-link {{ 'active' if page == 'split' }}" id="nav-split">
                         <span class="nav-icon">💷</span> Split Costs
                     </a></li>
+                <li><a href="/users" class="nav-link {{ 'active' if page == 'users' }}" id="nav-users">
+                        <span class="nav-icon">👥</span> Manage Users
+                    </a></li>
             </ul>
         </nav>
 
@@ -971,6 +974,23 @@
                     <div class="card" style="margin-top: 24px;">
                         <div class="card-header">
                             <h3 class="card-title">✅ Scanned Data — Review & Edit</h3>
+                        </div>
+
+                        <div class="form-group" style="background: rgba(99, 102, 241, 0.05); padding: 16px; border-radius: var(--radius-xs); margin-bottom: 20px;">
+                            <label style="color: var(--accent-light);">🔐 Who's uploading this receipt?</label>
+                            <div class="form-row">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label>Select User</label>
+                                    <select class="form-control" id="upload-user-select" onchange="togglePinEntry()">
+                                        <option value="">-- Select User --</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label>Enter 6-Digit PIN</label>
+                                    <input type="password" class="form-control" id="upload-pin" placeholder="••••••" maxlength="6" pattern="[0-9]{6}" disabled>
+                                </div>
+                            </div>
+                            <div id="pin-error" style="color: var(--danger); font-size: 13px; margin-top: 8px; display: none;"></div>
                         </div>
 
                         <div class="form-row">
@@ -1161,6 +1181,61 @@
             </div>
             {% endif %}
 
+            <!-- ═══ USERS MANAGEMENT ═══ -->
+            {% if page == 'users' %}
+            <div class="page-section active" id="section-users">
+                <div class="page-header">
+                    <h1>Manage Users</h1>
+                    <p>Add and manage household members with their PINs</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Add New User</h3>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Name</label>
+                            <input type="text" class="form-control" id="new-user-name" placeholder="Enter name">
+                        </div>
+                        <div class="form-group">
+                            <label>6-Digit PIN</label>
+                            <input type="password" class="form-control" id="new-user-pin" placeholder="••••••" maxlength="6" pattern="[0-9]{6}">
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary" onclick="addNewUser()">➕ Add User</button>
+                </div>
+
+                {% if users %}
+                <div class="card" style="margin-top: 24px;">
+                    <div class="card-header">
+                        <h3 class="card-title">Current Users</h3>
+                    </div>
+                    <div class="receipt-list" id="users-list">
+                        {% for u in users %}
+                        <div class="receipt-item" style="cursor: default;">
+                            <div class="receipt-info">
+                                <div class="receipt-store">{{ u.name }}</div>
+                                <div class="receipt-date">Added: {{ u.created_at[:10] }}</div>
+                            </div>
+                            <button class="btn btn-ghost" onclick="updatePinPrompt({{ u.id }}, '{{ u.name }}')" style="padding: 8px 12px; font-size: 12px; margin-right: 8px;">🔑 Change PIN</button>
+                            <button class="btn btn-danger" onclick="deleteUser({{ u.id }}, '{{ u.name }}')" style="padding: 8px 12px; font-size: 12px;">🗑</button>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">👥</div>
+                    <h3>No users yet</h3>
+                    <p>Add your first user to start tracking who uploads receipts</p>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+
         </main>
     </div>
 
@@ -1257,6 +1332,9 @@
             document.getElementById('edit-savings').value = data.total_savings || 0;
             document.getElementById('raw-text').textContent = data.raw_text || '';
 
+            // Load users for PIN selection
+            loadUsersForUpload();
+
             const tbody = document.getElementById('items-body');
             tbody.innerHTML = '';
             (data.items || []).forEach(item => {
@@ -1283,6 +1361,37 @@
             }
         }
 
+        async function loadUsersForUpload() {
+            try {
+                const resp = await fetch('/api/users');
+                const data = await resp.json();
+                const select = document.getElementById('upload-user-select');
+                select.innerHTML = '<option value="">-- Select User --</option>';
+                if (data.success && data.users) {
+                    data.users.forEach(u => {
+                        select.innerHTML += `<option value="${u.id}">${u.name}</option>`;
+                    });
+                }
+            } catch (err) {
+                console.error('Failed to load users:', err);
+            }
+        }
+
+        function togglePinEntry() {
+            const select = document.getElementById('upload-user-select');
+            const pinInput = document.getElementById('upload-pin');
+            const pinError = document.getElementById('pin-error');
+
+            if (select.value) {
+                pinInput.disabled = false;
+                pinInput.focus();
+            } else {
+                pinInput.disabled = true;
+                pinInput.value = '';
+            }
+            pinError.style.display = 'none';
+        }
+
         function addItemRow(name = '', price = '') {
             const tbody = document.getElementById('items-body');
             const tr = document.createElement('tr');
@@ -1305,6 +1414,44 @@
         }
 
         async function saveReceipt() {
+            const userId = document.getElementById('upload-user-select').value;
+            const pin = document.getElementById('upload-pin').value.trim();
+            const pinError = document.getElementById('pin-error');
+
+            // Validate user and PIN
+            if (!userId) {
+                pinError.textContent = '⚠️ Please select a user';
+                pinError.style.display = 'block';
+                return;
+            }
+
+            if (!pin || pin.length !== 6 || !/^\d{6}$/.test(pin)) {
+                pinError.textContent = '⚠️ PIN must be exactly 6 digits';
+                pinError.style.display = 'block';
+                return;
+            }
+
+            // Verify PIN
+            try {
+                const verifyResp = await fetch('/api/users/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: parseInt(userId), pin: pin })
+                });
+                const verifyData = await verifyResp.json();
+
+                if (!verifyData.valid) {
+                    pinError.textContent = '❌ Incorrect PIN. Please try again.';
+                    pinError.style.display = 'block';
+                    return;
+                }
+
+                pinError.style.display = 'none';
+            } catch (err) {
+                showToast('PIN verification failed: ' + err.message, 'error');
+                return;
+            }
+
             const store = document.getElementById('edit-store').value.trim();
             const date = document.getElementById('edit-date').value;
             const total = parseFloat(document.getElementById('edit-total').value) || 0;
@@ -1331,7 +1478,8 @@
                         total_amount: total,
                         image_path: currentFilePath,
                         discounts: discounts,
-                        total_savings: savings
+                        total_savings: savings,
+                        user_id: parseInt(userId)
                     })
                 });
                 const data = await resp.json();
@@ -1446,6 +1594,86 @@
                 if (data.success) showToast('Settings saved!');
             } catch (err) {
                 showToast('Save failed', 'error');
+            }
+        }
+
+        // ─── User Management ────────────────────────────────────────────
+        async function addNewUser() {
+            const name = document.getElementById('new-user-name').value.trim();
+            const pin = document.getElementById('new-user-pin').value.trim();
+
+            if (!name) {
+                showToast('Please enter a name', 'error');
+                return;
+            }
+
+            if (!pin || pin.length !== 6 || !/^\d{6}$/.test(pin)) {
+                showToast('PIN must be exactly 6 digits', 'error');
+                return;
+            }
+
+            try {
+                const resp = await fetch('/api/users', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, pin })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    showToast('User added successfully!');
+                    setTimeout(() => window.location.reload(), 1000);
+                } else {
+                    showToast(data.error || 'Failed to add user', 'error');
+                }
+            } catch (err) {
+                showToast('Failed to add user: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteUser(userId, userName) {
+            if (!confirm(`Delete user "${userName}"? This cannot be undone.`)) return;
+
+            try {
+                const resp = await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+                const data = await resp.json();
+
+                if (data.success) {
+                    showToast('User deleted');
+                    setTimeout(() => window.location.reload(), 500);
+                } else {
+                    showToast(data.error || 'Failed to delete user', 'error');
+                }
+            } catch (err) {
+                showToast('Delete failed: ' + err.message, 'error');
+            }
+        }
+
+        async function updatePinPrompt(userId, userName) {
+            const newPin = prompt(`Enter new 6-digit PIN for ${userName}:`);
+
+            if (!newPin) return;
+
+            if (newPin.length !== 6 || !/^\d{6}$/.test(newPin)) {
+                showToast('PIN must be exactly 6 digits', 'error');
+                return;
+            }
+
+            try {
+                const resp = await fetch(`/api/users/${userId}/pin`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pin: newPin })
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    showToast('PIN updated successfully!');
+                } else {
+                    showToast(data.error || 'Failed to update PIN', 'error');
+                }
+            } catch (err) {
+                showToast('Update failed: ' + err.message, 'error');
             }
         }
     </script>
