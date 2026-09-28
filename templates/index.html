@@ -699,6 +699,37 @@
             letter-spacing: 1px;
         }
 
+        .who-line {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .balance-pos { color: var(--success); font-weight: 700; }
+        .balance-neg { color: var(--danger); font-weight: 700; }
+
+        .transfer-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 20px;
+        }
+
+        .transfer-item+.transfer-item {
+            border-top: 1px solid var(--border-glass);
+        }
+
+        .settle-person-figures {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: var(--text-muted);
+            text-align: right;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
         .split-breakdown {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -877,8 +908,8 @@
                 <li><a href="/receipts" class="nav-link {{ 'active' if page == 'receipts' }}" id="nav-receipts">
                         <span class="nav-icon">📋</span> All Receipts
                     </a></li>
-                <li><a href="/split" class="nav-link {{ 'active' if page == 'split' }}" id="nav-split">
-                        <span class="nav-icon">💷</span> Split Costs
+                <li><a href="/settle" class="nav-link {{ 'active' if page == 'settle' }}" id="nav-settle">
+                        <span class="nav-icon">💷</span> Settle Expenses
                     </a></li>
                 <li><a href="/users" class="nav-link {{ 'active' if page == 'users' }}" id="nav-users">
                         <span class="nav-icon">👥</span> Manage Users
@@ -907,8 +938,8 @@
                         <div class="stat-value">£{{ "%.2f"|format(total) }}</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Residents</div>
-                        <div class="stat-value">{{ residents }}</div>
+                        <div class="stat-label">Members</div>
+                        <div class="stat-value">{{ members }}</div>
                     </div>
                     <div class="stat-card accent-green">
                         <div class="stat-label">Per Person</div>
@@ -929,6 +960,7 @@
                             <div class="receipt-info">
                                 <div class="receipt-store">{{ r.store_name }}</div>
                                 <div class="receipt-date">{{ r.date }}</div>
+                                <div class="who-line">Paid by {{ r.paid_by_name or 'unknown' }}</div>
                             </div>
                             <div class="receipt-amount">£{{ "%.2f"|format(r.total_amount) }}</div>
                         </div>
@@ -977,20 +1009,21 @@
                         </div>
 
                         <div class="form-group" style="background: rgba(99, 102, 241, 0.05); padding: 16px; border-radius: var(--radius-xs); margin-bottom: 20px;">
-                            <label style="color: var(--accent-light);">🔐 Who's uploading this receipt?</label>
                             <div class="form-row">
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label>Select User</label>
-                                    <select class="form-control" id="upload-user-select" onchange="togglePinEntry()">
-                                        <option value="">-- Select User --</option>
+                                    <label>Uploaded by</label>
+                                    <select class="form-control" id="upload-user-select" onchange="syncPaidBy()">
+                                        <option value="">-- Select --</option>
                                     </select>
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label>Enter 6-Digit PIN</label>
-                                    <input type="password" class="form-control" id="upload-pin" placeholder="••••••" maxlength="6" pattern="[0-9]{6}" disabled>
+                                    <label>Paid by</label>
+                                    <select class="form-control" id="paid-by-select">
+                                        <option value="">-- Select --</option>
+                                    </select>
                                 </div>
                             </div>
-                            <div id="pin-error" style="color: var(--danger); font-size: 13px; margin-top: 8px; display: none;"></div>
+                            <div id="who-error" style="color: var(--danger); font-size: 13px; margin-top: 8px; display: none;"></div>
                         </div>
 
                         <div class="form-row">
@@ -1083,6 +1116,7 @@
                                 <div class="receipt-store">{{ r.store_name }}</div>
                                 <div class="receipt-date">{{ r.date }} — {{ r['items']|length }} item{{ 's' if
                                     r['items']|length != 1 else '' }}</div>
+                                <div class="who-line">Paid by {{ r.paid_by_name or 'unknown' }} · Uploaded by {{ r.uploaded_by_name or 'unknown' }}</div>
                             </div>
                             <div class="receipt-amount">£{{ "%.2f"|format(r.total_amount) }}</div>
                             <button class="btn btn-danger" onclick="event.stopPropagation(); deleteReceipt({{ r.id }})"
@@ -1110,25 +1144,15 @@
             </div>
             {% endif %}
 
-            <!-- ═══ SPLIT COSTS ═══ -->
-            {% if page == 'split' %}
-            <div class="page-section active" id="section-split">
+            <!-- ═══ SETTLE EXPENSES ═══ -->
+            {% if page == 'settle' %}
+            <div class="page-section active" id="section-settle">
                 <div class="page-header">
-                    <h1>Split Costs</h1>
-                    <p>Divide expenses among household residents</p>
+                    <h1>Settle Expenses</h1>
+                    <p>Everyone's fair share, what they paid, and who owes whom</p>
                 </div>
 
                 <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Settings</h3>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Number of Residents</label>
-                        <input type="number" min="1" max="50" class="form-control" id="split-residents"
-                            value="{{ settings.residents or 1 }}" style="max-width: 200px;">
-                    </div>
-
                     <div class="form-row">
                         <div class="form-group">
                             <label>Period Start</label>
@@ -1143,16 +1167,14 @@
                     </div>
 
                     <div class="btn-group">
-                        <button class="btn btn-primary" onclick="calculateSplit()" id="btn-calculate">📊 Calculate
-                            Split</button>
-                        <button class="btn btn-ghost" onclick="saveSettings()">💾 Save Settings</button>
+                        <button class="btn btn-primary" onclick="calculateSplit()" id="btn-calculate">📊 Calculate</button>
                     </div>
                 </div>
 
                 <div class="split-result" id="split-result">
                     <div class="split-big-number">
                         <div class="amount" id="split-per-person">£0.00</div>
-                        <div class="label">per person contribution</div>
+                        <div class="label">each person's share</div>
                     </div>
 
                     <div class="split-breakdown">
@@ -1165,17 +1187,30 @@
                             <div class="stat-value highlight" id="split-count">0</div>
                         </div>
                         <div class="stat-card accent-green">
-                            <div class="stat-label">Residents</div>
-                            <div class="stat-value green" id="split-residents-display">1</div>
+                            <div class="stat-label">Members</div>
+                            <div class="stat-value green" id="split-members">0</div>
                         </div>
                     </div>
 
-                    <!-- Receipts in period -->
                     <div class="card" style="margin-top: 24px;">
                         <div class="card-header">
-                            <h3 class="card-title">Receipts in This Period</h3>
+                            <h3 class="card-title">Who pays whom</h3>
                         </div>
-                        <div class="receipt-list" id="split-receipts-list"></div>
+                        <div id="settle-transfers"></div>
+                    </div>
+
+                    <div class="card" style="margin-top: 24px;">
+                        <div class="card-header">
+                            <h3 class="card-title">Individual shares</h3>
+                        </div>
+                        <div class="receipt-list" id="settle-people"></div>
+                    </div>
+
+                    <div class="card" style="margin-top: 24px; display: none;" id="settle-unassigned-card">
+                        <div class="card-header">
+                            <h3 class="card-title" style="color: var(--danger);">⚠️ Receipts with no payer (not counted)</h3>
+                        </div>
+                        <div class="receipt-list" id="settle-unassigned"></div>
                     </div>
                 </div>
             </div>
@@ -1186,7 +1221,7 @@
             <div class="page-section active" id="section-users">
                 <div class="page-header">
                     <h1>Manage Users</h1>
-                    <p>Add and manage household members with their PINs</p>
+                    <p>Add and manage household members</p>
                 </div>
 
                 <div class="card">
@@ -1194,15 +1229,9 @@
                         <h3 class="card-title">Add New User</h3>
                     </div>
 
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Name</label>
-                            <input type="text" class="form-control" id="new-user-name" placeholder="Enter name">
-                        </div>
-                        <div class="form-group">
-                            <label>6-Digit PIN</label>
-                            <input type="password" class="form-control" id="new-user-pin" placeholder="••••••" maxlength="6" pattern="[0-9]{6}">
-                        </div>
+                    <div class="form-group">
+                        <label>Name</label>
+                        <input type="text" class="form-control" id="new-user-name" placeholder="Enter name">
                     </div>
 
                     <button class="btn btn-primary" onclick="addNewUser()">➕ Add User</button>
@@ -1220,7 +1249,6 @@
                                 <div class="receipt-store">{{ u.name }}</div>
                                 <div class="receipt-date">Added: {{ u.created_at[:10] }}</div>
                             </div>
-                            <button class="btn btn-ghost" onclick="updatePinPrompt({{ u.id }}, '{{ u.name }}')" style="padding: 8px 12px; font-size: 12px; margin-right: 8px;">🔑 Change PIN</button>
                             <button class="btn btn-danger" onclick="deleteUser({{ u.id }}, '{{ u.name }}')" style="padding: 8px 12px; font-size: 12px;">🗑</button>
                         </div>
                         {% endfor %}
@@ -1332,7 +1360,7 @@
             document.getElementById('edit-savings').value = data.total_savings || 0;
             document.getElementById('raw-text').textContent = data.raw_text || '';
 
-            // Load users for PIN selection
+            // Load users for the uploader / payer dropdowns
             loadUsersForUpload();
 
             const tbody = document.getElementById('items-body');
@@ -1365,31 +1393,25 @@
             try {
                 const resp = await fetch('/api/users');
                 const data = await resp.json();
-                const select = document.getElementById('upload-user-select');
-                select.innerHTML = '<option value="">-- Select User --</option>';
-                if (data.success && data.users) {
-                    data.users.forEach(u => {
-                        select.innerHTML += `<option value="${u.id}">${u.name}</option>`;
+                ['upload-user-select', 'paid-by-select'].forEach(id => {
+                    const select = document.getElementById(id);
+                    select.innerHTML = '<option value="">-- Select --</option>';
+                    (data.users || []).forEach(u => {
+                        const opt = document.createElement('option');
+                        opt.value = u.id;
+                        opt.textContent = u.name;
+                        select.appendChild(opt);
                     });
-                }
+                });
             } catch (err) {
                 console.error('Failed to load users:', err);
             }
         }
 
-        function togglePinEntry() {
-            const select = document.getElementById('upload-user-select');
-            const pinInput = document.getElementById('upload-pin');
-            const pinError = document.getElementById('pin-error');
-
-            if (select.value) {
-                pinInput.disabled = false;
-                pinInput.focus();
-            } else {
-                pinInput.disabled = true;
-                pinInput.value = '';
-            }
-            pinError.style.display = 'none';
+        // Most of the time the uploader is the payer, so pre-fill it
+        function syncPaidBy() {
+            const paidBy = document.getElementById('paid-by-select');
+            if (!paidBy.value) paidBy.value = document.getElementById('upload-user-select').value;
         }
 
         function addItemRow(name = '', price = '') {
@@ -1415,42 +1437,15 @@
 
         async function saveReceipt() {
             const userId = document.getElementById('upload-user-select').value;
-            const pin = document.getElementById('upload-pin').value.trim();
-            const pinError = document.getElementById('pin-error');
+            const paidBy = document.getElementById('paid-by-select').value;
+            const whoError = document.getElementById('who-error');
 
-            // Validate user and PIN
-            if (!userId) {
-                pinError.textContent = '⚠️ Please select a user';
-                pinError.style.display = 'block';
+            if (!userId || !paidBy) {
+                whoError.textContent = !userId ? '⚠️ Please choose who is uploading' : '⚠️ Please choose who paid';
+                whoError.style.display = 'block';
                 return;
             }
-
-            if (!pin || pin.length !== 6 || !/^\d{6}$/.test(pin)) {
-                pinError.textContent = '⚠️ PIN must be exactly 6 digits';
-                pinError.style.display = 'block';
-                return;
-            }
-
-            // Verify PIN
-            try {
-                const verifyResp = await fetch('/api/users/verify', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: parseInt(userId), pin: pin })
-                });
-                const verifyData = await verifyResp.json();
-
-                if (!verifyData.valid) {
-                    pinError.textContent = '❌ Incorrect PIN. Please try again.';
-                    pinError.style.display = 'block';
-                    return;
-                }
-
-                pinError.style.display = 'none';
-            } catch (err) {
-                showToast('PIN verification failed: ' + err.message, 'error');
-                return;
-            }
+            whoError.style.display = 'none';
 
             const store = document.getElementById('edit-store').value.trim();
             const date = document.getElementById('edit-date').value;
@@ -1479,7 +1474,8 @@
                         image_path: currentFilePath,
                         discounts: discounts,
                         total_savings: savings,
-                        user_id: parseInt(userId)
+                        user_id: parseInt(userId),
+                        paid_by: parseInt(paidBy)
                     })
                 });
                 const data = await resp.json();
@@ -1522,93 +1518,99 @@
             }
         }
 
-        // ─── Split Costs ────────────────────────────────────────────────
+        // ─── Settle Expenses ──────────────────────────────────────────
+        const gbp = n => '£' + Math.abs(n).toFixed(2);
+        const esc = t => { const d = document.createElement('div'); d.textContent = t ?? ''; return d.innerHTML; };
+
+        function toggleSettleDetail(id) {
+            document.getElementById('settle-detail-' + id).classList.toggle('visible');
+        }
+
         async function calculateSplit() {
-            const residents = document.getElementById('split-residents').value;
             const start = document.getElementById('split-start').value;
             const end = document.getElementById('split-end').value;
 
-            // Save settings first
-            await fetch('/api/settings', {
+            // Remember the period for next time
+            fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    residents: parseInt(residents),
-                    period_start: start,
-                    period_end: end
-                })
+                body: JSON.stringify({ period_start: start, period_end: end })
             });
 
             try {
                 const params = new URLSearchParams({ start, end });
-                const resp = await fetch(`/api/split?${params}`);
+                const resp = await fetch(`/api/settle?${params}`);
                 const data = await resp.json();
 
-                document.getElementById('split-per-person').textContent = '£' + data.per_person.toFixed(2);
-                document.getElementById('split-total').textContent = '£' + data.total.toFixed(2);
+                document.getElementById('split-per-person').textContent = gbp(data.per_person);
+                document.getElementById('split-total').textContent = gbp(data.total);
                 document.getElementById('split-count').textContent = data.receipt_count;
-                document.getElementById('split-residents-display').textContent = data.residents;
+                document.getElementById('split-members').textContent = data.members;
 
-                // Show receipts in period
-                const list = document.getElementById('split-receipts-list');
-                list.innerHTML = '';
-                if (data.receipts && data.receipts.length > 0) {
-                    data.receipts.forEach(r => {
-                        list.innerHTML += `
-                        <div class="receipt-item" style="cursor:default;">
-                            <div class="receipt-info">
-                                <div class="receipt-store">${r.store_name}</div>
-                                <div class="receipt-date">${r.date}</div>
+                // Who pays whom
+                const transfers = document.getElementById('settle-transfers');
+                transfers.innerHTML = data.transfers.length
+                    ? data.transfers.map(t => `
+                        <div class="transfer-item">
+                            <div><strong>${esc(t.from)}</strong> pays <strong>${esc(t.to)}</strong></div>
+                            <div class="receipt-amount">${gbp(t.amount)}</div>
+                        </div>`).join('')
+                    : '<div class="empty-state"><p>Everyone is square 🎉</p></div>';
+
+                // Individual shares
+                document.getElementById('settle-people').innerHTML = data.people.map(p => {
+                    const status = p.balance > 0
+                        ? `<span class="balance-pos">gets back ${gbp(p.balance)}</span>`
+                        : p.balance < 0
+                            ? `<span class="balance-neg">owes ${gbp(p.balance)}</span>`
+                            : '<span>square</span>';
+                    const receipts = p.receipts.length
+                        ? p.receipts.map(r => `
+                            <div class="detail-item">
+                                <span>${esc(r.date)} · ${esc(r.store_name)}</span>
+                                <span>${gbp(r.total_amount)}</span>
+                            </div>`).join('')
+                        : '<div class="detail-item"><span>No receipts paid in this period</span></div>';
+                    return `
+                        <div>
+                            <div class="receipt-item" onclick="toggleSettleDetail(${p.id})">
+                                <div class="receipt-info">
+                                    <div class="receipt-store">${esc(p.name)}</div>
+                                    <div class="receipt-date">${status}</div>
+                                </div>
+                                <div class="settle-person-figures">
+                                    <div>Paid<br><strong>${gbp(p.paid)}</strong></div>
+                                    <div>Share<br><strong>${gbp(p.share)}</strong></div>
+                                </div>
                             </div>
-                            <div class="receipt-amount">£${r.total_amount.toFixed(2)}</div>
+                            <div class="receipt-items-detail" id="settle-detail-${p.id}">${receipts}</div>
+                        </div>`;
+                }).join('') || '<div class="empty-state"><p>Add users first on the Manage Users page</p></div>';
+
+                // Receipts nobody is marked as paying for
+                const card = document.getElementById('settle-unassigned-card');
+                card.style.display = data.unassigned.length ? 'block' : 'none';
+                document.getElementById('settle-unassigned').innerHTML = data.unassigned.map(r => `
+                    <div class="receipt-item" style="cursor:default;">
+                        <div class="receipt-info">
+                            <div class="receipt-store">${esc(r.store_name)}</div>
+                            <div class="receipt-date">${esc(r.date)}</div>
                         </div>
-                    `;
-                    });
-                } else {
-                    list.innerHTML = '<div class="empty-state"><p>No receipts found in this period</p></div>';
-                }
+                        <div class="receipt-amount">${gbp(r.total_amount)}</div>
+                    </div>`).join('');
 
                 document.getElementById('split-result').classList.add('visible');
-                showToast('Split calculated!');
             } catch (err) {
                 showToast('Calculation failed: ' + err.message, 'error');
-            }
-        }
-
-        async function saveSettings() {
-            const residents = document.getElementById('split-residents').value;
-            const start = document.getElementById('split-start').value;
-            const end = document.getElementById('split-end').value;
-
-            try {
-                const resp = await fetch('/api/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        residents: parseInt(residents),
-                        period_start: start,
-                        period_end: end
-                    })
-                });
-                const data = await resp.json();
-                if (data.success) showToast('Settings saved!');
-            } catch (err) {
-                showToast('Save failed', 'error');
             }
         }
 
         // ─── User Management ────────────────────────────────────────────
         async function addNewUser() {
             const name = document.getElementById('new-user-name').value.trim();
-            const pin = document.getElementById('new-user-pin').value.trim();
 
             if (!name) {
                 showToast('Please enter a name', 'error');
-                return;
-            }
-
-            if (!pin || pin.length !== 6 || !/^\d{6}$/.test(pin)) {
-                showToast('PIN must be exactly 6 digits', 'error');
                 return;
             }
 
@@ -1616,7 +1618,7 @@
                 const resp = await fetch('/api/users', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, pin })
+                    body: JSON.stringify({ name })
                 });
                 const data = await resp.json();
 
@@ -1646,34 +1648,6 @@
                 }
             } catch (err) {
                 showToast('Delete failed: ' + err.message, 'error');
-            }
-        }
-
-        async function updatePinPrompt(userId, userName) {
-            const newPin = prompt(`Enter new 6-digit PIN for ${userName}:`);
-
-            if (!newPin) return;
-
-            if (newPin.length !== 6 || !/^\d{6}$/.test(newPin)) {
-                showToast('PIN must be exactly 6 digits', 'error');
-                return;
-            }
-
-            try {
-                const resp = await fetch(`/api/users/${userId}/pin`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ pin: newPin })
-                });
-                const data = await resp.json();
-
-                if (data.success) {
-                    showToast('PIN updated successfully!');
-                } else {
-                    showToast(data.error || 'Failed to update PIN', 'error');
-                }
-            } catch (err) {
-                showToast('Update failed: ' + err.message, 'error');
             }
         }
     </script>

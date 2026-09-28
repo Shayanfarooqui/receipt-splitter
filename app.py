@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
 from db import ReceiptDB
 from ocr import ReceiptOCR
+from settle import compute_settlement
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
@@ -32,15 +33,14 @@ def allowed_file(filename):
 def index():
     """Dashboard / home page."""
     receipts = db.get_all_receipts()
-    settings = db.get_settings()
     total = sum(r['total_amount'] for r in receipts)
-    residents = settings.get('residents', 1)
-    per_person = total / residents if residents > 0 else total
+    members = len(db.get_all_users())
+    per_person = total / members if members > 0 else total
     return render_template('index.html',
                            page='dashboard',
                            receipts=receipts,
                            total=total,
-                           residents=residents,
+                           members=members,
                            per_person=per_person)
 
 
@@ -57,11 +57,16 @@ def receipts_page():
     return render_template('index.html', page='receipts', receipts=receipts)
 
 
+@app.route('/settle')
+def settle_page():
+    """Settle expenses page."""
+    settings = db.get_settings()
+    return render_template('index.html', page='settle', settings=settings)
+
+
 @app.route('/split')
 def split_page():
-    """Expense splitting page."""
-    settings = db.get_settings()
-    return render_template('index.html', page='split', settings=settings)
+    return redirect(url_for('settle_page'))
 
 
 @app.route('/users')
@@ -106,6 +111,13 @@ def save_receipt():
     if not data:
         return jsonify({'error': 'No data provided'}), 400
 
+    uploaded_by = data.get('user_id')
+    paid_by = data.get('paid_by')
+    if not db.get_user_by_id(uploaded_by):
+        return jsonify({'error': 'Please choose who is uploading'}), 400
+    if not db.get_user_by_id(paid_by):
+        return jsonify({'error': 'Please choose who paid'}), 400
+
     receipt_id = db.add_receipt(
         store_name=data.get('store_name', 'Unknown Store'),
         date=data.get('date', datetime.now().strftime('%Y-%m-%d')),
@@ -114,7 +126,8 @@ def save_receipt():
         image_path=data.get('image_path', ''),
         discounts=data.get('discounts', []),
         total_savings=float(data.get('total_savings', 0)),
-        user_id=data.get('user_id')
+        user_id=uploaded_by,
+        paid_by=paid_by
     )
     return jsonify({'success': True, 'id': receipt_id})
 
@@ -134,34 +147,22 @@ def update_settings():
         return jsonify({'error': 'No data provided'}), 400
 
     db.update_settings(
-        residents=int(data.get('residents', 1)),
+        residents=len(db.get_all_users()) or 1,
         period_start=data.get('period_start', ''),
         period_end=data.get('period_end', '')
     )
     return jsonify({'success': True})
 
 
-@app.route('/api/split', methods=['GET'])
-def calculate_split():
-    """Calculate the expense split for the selected period."""
+@app.route('/api/settle', methods=['GET'])
+def calculate_settlement():
+    """Work out shares, balances and who pays whom for the selected period."""
     period_start = request.args.get('start', '')
     period_end = request.args.get('end', '')
-    settings = db.get_settings()
-    residents = settings.get('residents', 1)
-
     receipts = db.get_receipts_in_period(period_start, period_end)
-    total = sum(r['total_amount'] for r in receipts)
-    per_person = total / residents if residents > 0 else total
-
-    return jsonify({
-        'total': round(total, 2),
-        'residents': residents,
-        'per_person': round(per_person, 2),
-        'receipt_count': len(receipts),
-        'period_start': period_start,
-        'period_end': period_end,
-        'receipts': receipts
-    })
+    result = compute_settlement(receipts, db.get_all_users())
+    result.update({'period_start': period_start, 'period_end': period_end})
+    return jsonify(result)
 
 
 # ─── User Management API ────────────────────────────────────────
@@ -181,16 +182,11 @@ def add_user():
         return jsonify({'error': 'No data provided'}), 400
 
     name = data.get('name', '').strip()
-    pin = data.get('pin', '').strip()
-
     if not name:
         return jsonify({'error': 'Name is required'}), 400
 
-    if not pin or len(pin) != 6 or not pin.isdigit():
-        return jsonify({'error': 'PIN must be exactly 6 digits'}), 400
-
     try:
-        user_id = db.add_user(name, pin)
+        user_id = db.add_user(name)
         return jsonify({'success': True, 'id': user_id})
     except Exception as e:
         return jsonify({'error': f'Failed to add user: {str(e)}'}), 500
@@ -198,52 +194,14 @@ def add_user():
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
 def delete_user(user_id):
-    """Delete a user."""
+    """Delete a user who has no receipts."""
+    if db.user_has_receipts(user_id):
+        return jsonify({'error': 'This user has receipts, so they cannot be deleted'}), 400
     try:
         db.delete_user(user_id)
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'error': f'Failed to delete user: {str(e)}'}), 500
-
-
-@app.route('/api/users/<int:user_id>/pin', methods=['PUT'])
-def update_user_pin(user_id):
-    """Update a user's PIN."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    new_pin = data.get('pin', '').strip()
-
-    if not new_pin or len(new_pin) != 6 or not new_pin.isdigit():
-        return jsonify({'error': 'PIN must be exactly 6 digits'}), 400
-
-    try:
-        db.update_user_pin(user_id, new_pin)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'error': f'Failed to update PIN: {str(e)}'}), 500
-
-
-@app.route('/api/users/verify', methods=['POST'])
-def verify_user_pin():
-    """Verify a user's PIN."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No data provided'}), 400
-
-    user_id = data.get('user_id')
-    pin = data.get('pin', '').strip()
-
-    if not user_id or not pin:
-        return jsonify({'error': 'User ID and PIN are required'}), 400
-
-    is_valid = db.verify_pin(user_id, pin)
-    if is_valid:
-        user = db.get_user_by_id(user_id)
-        return jsonify({'success': True, 'valid': True, 'user': user})
-    else:
-        return jsonify({'success': True, 'valid': False})
 
 
 if __name__ == '__main__':

@@ -29,7 +29,6 @@ class ReceiptDB:
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
-                pin TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
         ''')
@@ -45,8 +44,10 @@ class ReceiptDB:
                 total_savings REAL NOT NULL DEFAULT 0,
                 image_path TEXT,
                 user_id INTEGER,
+                paid_by INTEGER,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id)
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (paid_by) REFERENCES users(id)
             )
         ''')
 
@@ -62,6 +63,18 @@ class ReceiptDB:
             cursor.execute('SELECT user_id FROM receipts LIMIT 1')
         except sqlite3.OperationalError:
             cursor.execute("ALTER TABLE receipts ADD COLUMN user_id INTEGER")
+
+        # Migrate: add paid_by column; older receipts were paid by whoever uploaded them
+        try:
+            cursor.execute('SELECT paid_by FROM receipts LIMIT 1')
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE receipts ADD COLUMN paid_by INTEGER")
+            cursor.execute("UPDATE receipts SET paid_by = user_id")
+
+        # Migrate: PINs are no longer used
+        cols = [r['name'] for r in cursor.execute('PRAGMA table_info(users)')]
+        if 'pin' in cols:
+            cursor.execute('ALTER TABLE users DROP COLUMN pin')
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS settings (
@@ -81,13 +94,13 @@ class ReceiptDB:
     # ─── Receipts ────────────────────────────────────────────────────
 
     def add_receipt(self, store_name, date, items, total_amount, image_path='',
-                    discounts=None, total_savings=0, user_id=None):
+                    discounts=None, total_savings=0, user_id=None, paid_by=None):
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO receipts (store_name, date, items, discounts, total_amount,
-                                  total_savings, image_path, user_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  total_savings, image_path, user_id, paid_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             store_name,
             date,
@@ -97,6 +110,7 @@ class ReceiptDB:
             total_savings,
             image_path,
             user_id,
+            paid_by,
             datetime.now().isoformat()
         ))
         receipt_id = cursor.lastrowid
@@ -104,10 +118,18 @@ class ReceiptDB:
         conn.close()
         return receipt_id
 
+    # Receipts with the uploader's and payer's names attached
+    RECEIPT_SELECT = '''
+        SELECT r.*, up.name AS uploaded_by_name, pb.name AS paid_by_name
+        FROM receipts r
+        LEFT JOIN users up ON up.id = r.user_id
+        LEFT JOIN users pb ON pb.id = r.paid_by
+    '''
+
     def get_all_receipts(self):
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM receipts ORDER BY date DESC, created_at DESC')
+        cursor.execute(self.RECEIPT_SELECT + ' ORDER BY r.date DESC, r.created_at DESC')
         rows = cursor.fetchall()
         conn.close()
         return [self._row_to_dict(r) for r in rows]
@@ -115,7 +137,7 @@ class ReceiptDB:
     def get_receipt(self, receipt_id):
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute('SELECT * FROM receipts WHERE id = ?', (receipt_id,))
+        cursor.execute(self.RECEIPT_SELECT + ' WHERE r.id = ?', (receipt_id,))
         row = cursor.fetchone()
         conn.close()
         return self._row_to_dict(row) if row else None
@@ -131,23 +153,17 @@ class ReceiptDB:
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        if start_date and end_date:
-            cursor.execute(
-                'SELECT * FROM receipts WHERE date >= ? AND date <= ? ORDER BY date DESC',
-                (start_date, end_date)
-            )
-        elif start_date:
-            cursor.execute(
-                'SELECT * FROM receipts WHERE date >= ? ORDER BY date DESC',
-                (start_date,)
-            )
-        elif end_date:
-            cursor.execute(
-                'SELECT * FROM receipts WHERE date <= ? ORDER BY date DESC',
-                (end_date,)
-            )
-        else:
-            cursor.execute('SELECT * FROM receipts ORDER BY date DESC')
+        where, params = [], []
+        if start_date:
+            where.append('r.date >= ?')
+            params.append(start_date)
+        if end_date:
+            where.append('r.date <= ?')
+            params.append(end_date)
+        sql = self.RECEIPT_SELECT
+        if where:
+            sql += ' WHERE ' + ' AND '.join(where)
+        cursor.execute(sql + ' ORDER BY r.date DESC', params)
 
         rows = cursor.fetchall()
         conn.close()
@@ -182,38 +198,25 @@ class ReceiptDB:
 
     # ─── Users ───────────────────────────────────────────────────
 
-    def add_user(self, name, pin):
-        """Add a new user with a 6-digit PIN."""
+    def add_user(self, name):
+        """Add a new user."""
         conn = self._get_conn()
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO users (name, pin, created_at)
-            VALUES (?, ?, ?)
-        ''', (name, pin, datetime.now().isoformat()))
+        cursor.execute('INSERT INTO users (name, created_at) VALUES (?, ?)',
+                       (name, datetime.now().isoformat()))
         user_id = cursor.lastrowid
         conn.commit()
         conn.close()
         return user_id
 
     def get_all_users(self):
-        """Get all users (without PINs for security)."""
+        """Get all users."""
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, created_at FROM users ORDER BY name')
         rows = cursor.fetchall()
         conn.close()
         return [dict(r) for r in rows]
-
-    def verify_pin(self, user_id, pin):
-        """Verify a user's PIN."""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute('SELECT pin FROM users WHERE id = ?', (user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        if row and row['pin'] == pin:
-            return True
-        return False
 
     def get_user_by_id(self, user_id):
         """Get user details by ID."""
@@ -224,18 +227,20 @@ class ReceiptDB:
         conn.close()
         return dict(row) if row else None
 
+    def user_has_receipts(self, user_id):
+        """True if the user uploaded or paid for any receipt."""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM receipts WHERE user_id = ? OR paid_by = ? LIMIT 1',
+                       (user_id, user_id))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
+
     def delete_user(self, user_id):
         """Delete a user."""
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM users WHERE id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-
-    def update_user_pin(self, user_id, new_pin):
-        """Update a user's PIN."""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET pin = ? WHERE id = ?', (new_pin, user_id))
         conn.commit()
         conn.close()
