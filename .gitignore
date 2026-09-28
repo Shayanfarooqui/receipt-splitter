@@ -34,3 +34,6 @@ uploads/
 
 # Tesseract cache or temp (if any)
 *.tr
+
+# Admin login signing key
+.secret_key

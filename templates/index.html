@@ -911,9 +911,18 @@
                 <li><a href="/settle" class="nav-link {{ 'active' if page == 'settle' }}" id="nav-settle">
                         <span class="nav-icon">💷</span> Settle Expenses
                     </a></li>
+                {% if is_admin %}
                 <li><a href="/users" class="nav-link {{ 'active' if page == 'users' }}" id="nav-users">
                         <span class="nav-icon">👥</span> Manage Users
                     </a></li>
+                <li><a href="/logout" class="nav-link" id="nav-logout">
+                        <span class="nav-icon">🔓</span> Log out (admin)
+                    </a></li>
+                {% else %}
+                <li><a href="/login" class="nav-link {{ 'active' if page == 'login' }}" id="nav-login">
+                        <span class="nav-icon">🔐</span> Admin
+                    </a></li>
+                {% endif %}
             </ul>
         </nav>
 
@@ -1119,8 +1128,10 @@
                                 <div class="who-line">Paid by {{ r.paid_by_name or 'unknown' }} · Uploaded by {{ r.uploaded_by_name or 'unknown' }}</div>
                             </div>
                             <div class="receipt-amount">£{{ "%.2f"|format(r.total_amount) }}</div>
+                            {% if is_admin %}
                             <button class="btn btn-danger" onclick="event.stopPropagation(); deleteReceipt({{ r.id }})"
                                 style="padding: 8px 12px; font-size: 12px;">🗑</button>
+                            {% endif %}
                         </div>
                         <div class="receipt-items-detail" id="detail-{{ r.id }}">
                             {% for item in r['items'] %}
@@ -1212,6 +1223,34 @@
                         </div>
                         <div class="receipt-list" id="settle-unassigned"></div>
                     </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- ═══ ADMIN LOGIN ═══ -->
+            {% if page == 'login' %}
+            <div class="page-section active" id="section-login">
+                <div class="page-header">
+                    <h1>Admin</h1>
+                    <p>Log in to manage users and receipts</p>
+                </div>
+
+                <div class="card" style="max-width: 420px;">
+                    {% if password_set %}
+                    <form method="post">
+                        <div class="form-group">
+                            <label>Password</label>
+                            <input type="password" name="password" class="form-control" autofocus required>
+                        </div>
+                        {% if error %}
+                        <div style="color: var(--danger); font-size: 13px; margin-bottom: 12px;">{{ error }}</div>
+                        {% endif %}
+                        <button type="submit" class="btn btn-primary">Log in</button>
+                    </form>
+                    {% else %}
+                    <p>No admin password is set yet. On the laptop, run:</p>
+                    <pre style="margin-top: 12px; padding: 12px; background: var(--bg-glass); border-radius: var(--radius-xs);">python set_admin_password.py</pre>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}

@@ -88,6 +88,11 @@ class ReceiptDB:
         # Insert default settings if not present
         cursor.execute('INSERT OR IGNORE INTO settings (id, residents) VALUES (1, 1)')
 
+        # Migrate: admin password (hashed) lives in settings
+        cols = [r['name'] for r in cursor.execute('PRAGMA table_info(settings)')]
+        if 'admin_password_hash' not in cols:
+            cursor.execute('ALTER TABLE settings ADD COLUMN admin_password_hash TEXT')
+
         conn.commit()
         conn.close()
 
@@ -184,7 +189,11 @@ class ReceiptDB:
         cursor.execute('SELECT * FROM settings WHERE id = 1')
         row = cursor.fetchone()
         conn.close()
-        return dict(row) if row else {'id': 1, 'residents': 1, 'period_start': '', 'period_end': ''}
+        if not row:
+            return {'id': 1, 'residents': 1, 'period_start': '', 'period_end': ''}
+        settings = dict(row)
+        settings.pop('admin_password_hash', None)
+        return settings
 
     def update_settings(self, residents=1, period_start='', period_end=''):
         conn = self._get_conn()
@@ -193,6 +202,18 @@ class ReceiptDB:
             UPDATE settings SET residents = ?, period_start = ?, period_end = ?
             WHERE id = 1
         ''', (residents, period_start, period_end))
+        conn.commit()
+        conn.close()
+
+    def get_admin_password_hash(self):
+        conn = self._get_conn()
+        row = conn.execute('SELECT admin_password_hash FROM settings WHERE id = 1').fetchone()
+        conn.close()
+        return row['admin_password_hash'] if row else None
+
+    def set_admin_password_hash(self, password_hash):
+        conn = self._get_conn()
+        conn.execute('UPDATE settings SET admin_password_hash = ? WHERE id = 1', (password_hash,))
         conn.commit()
         conn.close()
 

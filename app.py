@@ -5,8 +5,12 @@ Scan supermarket receipts, track expenses, and split costs among residents.
 
 import os
 import json
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+import time
+import secrets
+from datetime import datetime, timedelta
+from functools import wraps
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
+from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
 from db import ReceiptDB
 from ocr import ReceiptOCR
@@ -19,8 +23,46 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'webp'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+
+def _load_secret_key():
+    """Signs the admin login cookie. Generated once and kept next to the app."""
+    if os.environ.get('SECRET_KEY'):
+        return os.environ['SECRET_KEY']
+    path = os.path.join(os.path.dirname(__file__), '.secret_key')
+    if not os.path.exists(path):
+        with open(path, 'w') as f:
+            f.write(secrets.token_hex(32))
+        os.chmod(path, 0o600)
+    with open(path) as f:
+        return f.read().strip()
+
+
+app.secret_key = _load_secret_key()
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+
 db = ReceiptDB()
 ocr = ReceiptOCR()
+
+
+def is_admin():
+    return session.get('admin') is True
+
+
+@app.context_processor
+def inject_admin():
+    return {'is_admin': is_admin()}
+
+
+def admin_required(view):
+    """Pages redirect to the login screen; API calls get a 403."""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not is_admin():
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Admin only'}), 403
+            return redirect(url_for('login', next=request.path))
+        return view(*args, **kwargs)
+    return wrapper
 
 
 def allowed_file(filename):
@@ -70,10 +112,39 @@ def split_page():
 
 
 @app.route('/users')
+@admin_required
 def users_page():
     """User management page."""
     users = db.get_all_users()
     return render_template('index.html', page='users', users=users)
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Admin login."""
+    password_hash = db.get_admin_password_hash()
+    error = None
+    if request.method == 'POST':
+        password = request.form.get('password', '')
+        if password_hash and check_password_hash(password_hash, password):
+            session.clear()
+            session['admin'] = True
+            session.permanent = True
+            next_url = request.args.get('next', '')
+            # Only follow local paths
+            if not next_url.startswith('/') or next_url.startswith('//'):
+                next_url = url_for('index')
+            return redirect(next_url)
+        time.sleep(1)  # slow down password guessing
+        error = 'Wrong password'
+    return render_template('index.html', page='login', error=error,
+                           password_set=bool(password_hash))
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
 
 
 # ─── API Endpoints ───────────────────────────────────────────────────
@@ -133,6 +204,7 @@ def save_receipt():
 
 
 @app.route('/api/receipts/<int:receipt_id>', methods=['DELETE'])
+@admin_required
 def delete_receipt(receipt_id):
     """Delete a receipt."""
     db.delete_receipt(receipt_id)
@@ -175,6 +247,7 @@ def get_users():
 
 
 @app.route('/api/users', methods=['POST'])
+@admin_required
 def add_user():
     """Add a new user."""
     data = request.get_json()
@@ -193,6 +266,7 @@ def add_user():
 
 
 @app.route('/api/users/<int:user_id>', methods=['DELETE'])
+@admin_required
 def delete_user(user_id):
     """Delete a user who has no receipts."""
     if db.user_has_receipts(user_id):
