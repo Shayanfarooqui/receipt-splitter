@@ -15,6 +15,7 @@ print("=" * 60)
 ocr = ReceiptOCR()
 result = ocr.scan(test_image)
 
+print(f"\n  Engine: {result['engine']}")
 print(f"\n  Store: {result['store_name']}")
 print(f"  Date:  {result['date']}")
 print(f"  Total: GBP {result['total_amount']:.2f}")

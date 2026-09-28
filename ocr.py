@@ -1,29 +1,73 @@
 """
-OCR module — Tesseract-based receipt scanning and text parsing.
+OCR module — receipt scanning and text parsing.
 Tuned for UK supermarket receipts (Tesco, Asda, Sainsbury's, Aldi, Lidl, etc.)
+
+Engines (pick with the OCR_ENGINE env var: 'paddle' or 'tesseract'):
+- PaddleOCR (default when installed): far more accurate on phone photos.
+  Returns text boxes, which are regrouped into receipt lines by position.
+- Tesseract: lightweight fallback, used if PaddleOCR is missing or fails.
 
 Key design choices:
 - No binarization (destroys price data on receipt photos)
-- Heavy contrast + sharpness for best text clarity
-- PSM 6 (assume uniform block of text) works best for receipts
+- Heavy contrast + sharpness for best text clarity (Tesseract only)
+- PSM 6 (assume uniform block of text) works best for receipts (Tesseract only)
 - Fuzzy price matching to handle minor OCR garbling
 - Post-savings total selection
 """
 
 import re
 import os
+import logging
+import threading
 from datetime import datetime
 import pytesseract
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+
+log = logging.getLogger(__name__)
 
 # Configure Tesseract path for Windows
 TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 if os.path.exists(TESSERACT_PATH):
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 
+# Skip PaddleX's slow connectivity check on every start; models are cached after first download
+os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
+
+
+class PaddleEngine:
+    """Thin wrapper around PaddleOCR 3.x. The model is loaded once and reused."""
+
+    def __init__(self):
+        from paddleocr import PaddleOCR
+        # Mobile models: fast on a laptop CPU and light on RAM
+        self.model = PaddleOCR(
+            text_detection_model_name='PP-OCRv5_mobile_det',
+            text_recognition_model_name='en_PP-OCRv5_mobile_rec',
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+
+    def read_boxes(self, img):
+        """Return a list of (text, [x_min, y_min, x_max, y_max]) for an RGB PIL image."""
+        import numpy as np
+        # PaddleOCR expects BGR arrays (OpenCV convention)
+        arr = np.array(img)[:, :, ::-1]
+        results = self.model.predict(arr)
+        if not results:
+            return []
+        res = results[0]
+        return [(text, [float(v) for v in box])
+                for text, box in zip(res['rec_texts'], res['rec_boxes'])
+                if text and text.strip()]
+
 
 class ReceiptOCR:
-    def __init__(self):
+    def __init__(self, engine=None):
+        self.engine_name = (engine or os.environ.get('OCR_ENGINE', 'paddle')).lower()
+        self._paddle = None
+        self._paddle_lock = threading.Lock()
+
         self.skip_keywords = [
             'subtotal', 'sub total', 'sub-total',
             'vat', 'tax summary', 'tax total',
@@ -55,15 +99,67 @@ class ReceiptOCR:
 
     def scan(self, image_path):
         """Scan a receipt image and extract structured data."""
-        img = self._preprocess(image_path)
-
-        # PSM 6 = assume a single uniform block of text — best for receipts
-        custom_config = r'--oem 3 --psm 6'
-        raw_text = pytesseract.image_to_string(img, lang='eng', config=custom_config)
+        raw_text, engine = None, 'tesseract'
+        if self.engine_name == 'paddle':
+            try:
+                raw_text = self._scan_paddle(image_path)
+                engine = 'paddle'
+            except Exception:
+                log.exception('PaddleOCR failed, falling back to Tesseract')
+                raw_text = None
+        if raw_text is None:
+            raw_text = self._scan_tesseract(image_path)
 
         parsed = self._parse_receipt(raw_text)
         parsed['raw_text'] = raw_text
+        parsed['engine'] = engine
         return parsed
+
+    def _scan_tesseract(self, image_path):
+        img = self._preprocess(image_path)
+        # PSM 6 = assume a single uniform block of text — best for receipts
+        custom_config = r'--oem 3 --psm 6'
+        return pytesseract.image_to_string(img, lang='eng', config=custom_config)
+
+    def _scan_paddle(self, image_path):
+        img = Image.open(image_path)
+        # Auto-orient (phone photos are often rotated); OpenCV ignores EXIF
+        img = ImageOps.exif_transpose(img).convert('RGB')
+        # The model is heavy to load and not thread-safe, so share one behind a lock
+        with self._paddle_lock:
+            if self._paddle is None:
+                self._paddle = PaddleEngine()
+            boxes = self._paddle.read_boxes(img)
+        return '\n'.join(self._boxes_to_lines(boxes))
+
+    def _boxes_to_lines(self, boxes):
+        """
+        Group OCR text boxes into receipt lines.
+        Boxes whose vertical centres are close belong to the same line; within
+        a line they are ordered left to right and joined with a wide gap so the
+        item-name / price split in the parser still works.
+        """
+        if not boxes:
+            return []
+        boxes = sorted(boxes, key=lambda b: (b[1][1] + b[1][3]) / 2)
+        heights = sorted(b[1][3] - b[1][1] for b in boxes)
+        median_h = heights[len(heights) // 2] or 1
+
+        lines = []  # each: {'y': centre, 'boxes': [...]}
+        for text, box in boxes:
+            yc = (box[1] + box[3]) / 2
+            if lines and abs(yc - lines[-1]['y']) <= median_h * 0.5:
+                line = lines[-1]
+                line['boxes'].append((text, box))
+                line['y'] = sum((b[1] + b[3]) / 2 for _, b in line['boxes']) / len(line['boxes'])
+            else:
+                lines.append({'y': yc, 'boxes': [(text, box)]})
+
+        out = []
+        for line in lines:
+            parts = [t.strip() for t, _ in sorted(line['boxes'], key=lambda b: b[1][0])]
+            out.append('   '.join(parts))
+        return out
 
     def _preprocess(self, image_path):
         """
